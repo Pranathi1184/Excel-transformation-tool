@@ -1,0 +1,15 @@
+# Render Blueprint: Excel Data Transformation Tool API
+# https://render.com/docs/blueprint-spec
+# Deploy from repo root; service runs from backend/.
+services:
+  - type: web
+    name: excel-transform-api
+    runtime: python
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/v1/health
+    envVars:
+      - key: ALLOWED_ORIGINS
+        sync: false
+        # Set in Render dashboard to your frontend URL, e.g. https://your-app.vercel.app

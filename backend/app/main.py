@@ -1,0 +1,113 @@
+"""
+FastAPI main application entry point.
+"""
+import asyncio
+import logging
+import os
+from contextlib import asynccontextmanager
+from pathlib import Path
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+from app.api.v1 import health, excel, transform, merge, analyze
+from app.utils.file_cleanup import cleanup_outputs_dir, DEFAULT_MAX_AGE_SECONDS
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# Create uploads directory if it doesn't exist
+uploads_dir = Path("uploads")
+uploads_dir.mkdir(exist_ok=True)
+
+# Create outputs directory if it doesn't exist
+outputs_dir = Path("outputs")
+outputs_dir.mkdir(exist_ok=True)
+
+# Run outputs cleanup every hour (seconds)
+CLEANUP_INTERVAL_SECONDS = 3600
+
+
+async def _periodic_cleanup():
+    """Background task: clean outputs dir every CLEANUP_INTERVAL_SECONDS."""
+    while True:
+        await asyncio.sleep(CLEANUP_INTERVAL_SECONDS)
+        try:
+            n = cleanup_outputs_dir(outputs_dir, DEFAULT_MAX_AGE_SECONDS)
+            if n:
+                logger.info("Periodic cleanup: removed %d file(s) from outputs/", n)
+        except Exception as e:
+            logger.warning("Periodic cleanup failed: %s", e)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Lifespan context manager for startup and shutdown events."""
+    # Startup: Rebuild file storage from disk
+    from app.api.v1.excel import _rebuild_file_storage_from_disk
+    try:
+        _rebuild_file_storage_from_disk()
+        logger.info("File storage rebuilt from disk on startup")
+    except Exception as e:
+        logger.warning("Could not rebuild file storage from disk: %s", e)
+
+    # Cleanup old output files on startup
+    try:
+        n = cleanup_outputs_dir(outputs_dir, DEFAULT_MAX_AGE_SECONDS)
+        if n:
+            logger.info("Startup cleanup: removed %d file(s) from outputs/", n)
+    except Exception as e:
+        logger.warning("Startup output cleanup failed: %s", e)
+
+    # Start background cleanup task
+    cleanup_task = asyncio.create_task(_periodic_cleanup())
+
+    yield
+
+    # Shutdown: cancel background task
+    cleanup_task.cancel()
+    try:
+        await cleanup_task
+    except asyncio.CancelledError:
+        pass
+
+
+app = FastAPI(
+    title="Excel Data Transformation Tool API",
+    description="Backend API for Excel file transformation operations",
+    version="1.0.0",
+    lifespan=lifespan,
+)
+
+# CORS: allow origins from env (e.g. production frontend URL) or localhost for dev
+_allowed_origins = os.environ.get(
+    "ALLOWED_ORIGINS",
+    "http://localhost:5173,http://localhost:3000",
+).strip().split(",")
+allowed_origins = [o.strip() for o in _allowed_origins if o.strip()]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=allowed_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Include API routers
+app.include_router(health.router, prefix="/api/v1", tags=["health"])
+app.include_router(excel.router, prefix="/api/v1", tags=["excel"])
+app.include_router(transform.router, prefix="/api/v1", tags=["transform"])
+app.include_router(merge.router, prefix="/api/v1", tags=["merge"])
+app.include_router(analyze.router, prefix="/api/v1", tags=["analyze"])
+
+
+@app.get("/")
+async def root():
+    """Root endpoint."""
+    return {"message": "Excel Data Transformation Tool API"}
+
